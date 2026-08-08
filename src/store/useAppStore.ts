@@ -10,7 +10,7 @@ import type {
   ScanResult,
   StorageSummary,
 } from "../types/models";
-import { generateDeviceSnapshot } from "../data/deviceSimulator";
+import DeviceScanner from "../engine/nativeScanner";
 import {
   buildStorageSummary,
   computeCleanupScore,
@@ -85,11 +85,7 @@ const DEFAULT_SETTINGS: CleanupSettings = {
   storageAccessGranted: true,
 };
 
-let snapshotCache: ReturnType<typeof generateDeviceSnapshot> | null = null;
-function getSnapshot() {
-  if (!snapshotCache) snapshotCache = generateDeviceSnapshot();
-  return snapshotCache;
-}
+// Removing snapshot cache as we use real data now
 
 export const useAppStore = create<Store>()(
   persist(
@@ -117,38 +113,45 @@ export const useAppStore = create<Store>()(
 
       runScan: async () => {
         set({ scanState: "scanning", scanProgress: 0 });
-        const snapshot = getSnapshot();
         const totalSteps = 24;
         for (let step = 1; step <= totalSteps; step++) {
           await new Promise((r) => setTimeout(r, 28));
           set({ scanProgress: Math.round((step / totalSteps) * 100) });
         }
         const start = Date.now();
-        set({
-          apps: snapshot.apps,
-          files: snapshot.files,
-          totalBytes: snapshot.totalDeviceBytes,
-        });
-        get().recomputeDerived();
-        set({
-          scanState: "done",
-          lastScan: {
-            scannedAt: Date.now(),
-            appsScanned: snapshot.apps.length,
-            filesScanned: snapshot.files.length,
-            durationMs: Date.now() - start + totalSteps * 28,
-          },
-        });
+        
+        try {
+          const { apps } = await DeviceScanner.scanApps();
+          const { files } = await DeviceScanner.scanFiles();
+          
+          set({
+            apps: apps || [],
+            files: files || [],
+            totalBytes: 128 * 1024 * 1024 * 1024, // Assuming 128GB device for now, could be fetched natively
+          });
+          get().recomputeDerived();
+          set({
+            scanState: "done",
+            lastScan: {
+              scannedAt: Date.now(),
+              appsScanned: (apps || []).length,
+              filesScanned: (files || []).length,
+              durationMs: Date.now() - start + totalSteps * 28,
+            },
+          });
+        } catch (error) {
+          console.error("Native scan failed:", error);
+          set({ scanState: "idle" });
+        }
       },
 
       recomputeDerived: () => {
         const { apps, files, totalBytes, settings } = get();
         if (apps.length === 0 && files.length === 0) return;
         const usedByAppsAndFiles = apps.reduce((s, a) => s + a.sizeBytes, 0) + files.reduce((s, f) => s + f.sizeBytes, 0);
-        const snapshot = getSnapshot();
-        const freeBytes = totalBytes > 0 ? totalBytes - (totalBytes - snapshot.freeBytesBeforeAnalysis) : snapshot.freeBytesBeforeAnalysis;
-        void usedByAppsAndFiles;
-        const summary = buildStorageSummary(apps, files, totalBytes || snapshot.totalDeviceBytes, freeBytes);
+        // Calculate free bytes (mock logic for now since we hardcoded 128GB)
+        const freeBytes = totalBytes > usedByAppsAndFiles ? totalBytes - usedByAppsAndFiles - (20 * 1024 * 1024 * 1024) : 0;
+        const summary = buildStorageSummary(apps, files, totalBytes, freeBytes);
         const duplicates = findDuplicates(files);
         const recommendations = generateRecommendations(apps, files, duplicates, settings);
         const cleanupScore = computeCleanupScore(summary, apps, files, duplicates, settings);
